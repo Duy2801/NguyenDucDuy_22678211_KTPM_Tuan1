@@ -7,7 +7,7 @@ async function sendMessage() {
   const channel = await connection.createChannel();
 
   const queue = "demo_queue";
-  const message = "Hello from NodeJS Producer";
+  const message = "Nguyen Duc DUy 4";
 
   await channel.assertQueue(queue);
   channel.sendToQueue(queue, Buffer.from(message));
