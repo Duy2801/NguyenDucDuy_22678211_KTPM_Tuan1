@@ -5,25 +5,35 @@ const authController = require("../controllers/auth.controller");
 const authenticateToken = require("../middlewares/auth.middleware");
 const authorizeRole = require("../middlewares/role.middleware");
 
-// login
 router.post("/login", authController.login);
 
-// refresh token
 router.post("/refresh-token", authController.refreshToken);
 
-// ai có token cũng vào được
 router.get("/profile", authenticateToken, (req, res) => {
   res.json(req.user);
 });
 
-// chỉ admin
+router.get("/admin", authenticateToken, authorizeRole("admin"), (req, res) => {
+  res.json({ message: "Chào ADMIN 👑" });
+});
+
+// Lấy danh sách tất cả users (chỉ admin) - phải đứng trước /users/:id
 router.get(
-  "/admin",
+  "/users",
   authenticateToken,
   authorizeRole("admin"),
-  (req, res) => {
-    res.json({ message: "Chào ADMIN 👑" });
-  }
+  authController.getAllUsers,
+);
+
+// Lấy thông tin user theo ID (Guest chỉ xem của mình, Admin xem tất cả)
+router.get("/users/:id", authenticateToken, authController.getUserInfo);
+
+// Xóa user (chỉ admin)
+router.delete(
+  "/users/:id",
+  authenticateToken,
+  authorizeRole("admin"),
+  authController.deleteUser,
 );
 
 module.exports = router;
