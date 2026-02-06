@@ -1,12 +1,19 @@
 {
-  "name": "bai2",
+  "name": "bai2-design-patterns",
   "version": "1.0.0",
-  "description": "",
+  "description": "Bài tập Design Patterns: State, Strategy, Decorator - Tuần 2",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "design-patterns",
+    "state-pattern",
+    "strategy-pattern",
+    "decorator-pattern",
+    "nodejs"
+  ],
+  "author": "Nguyen Duc Duy - 22678211",
   "license": "ISC"
 }
