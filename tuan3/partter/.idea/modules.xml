@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/tuan03/Adapter/Adapter.iml" filepath="$PROJECT_DIR$/tuan03/Adapter/Adapter.iml" />
+      <module fileurl="file://$PROJECT_DIR$/tuan03/Composite/Composite.iml" filepath="$PROJECT_DIR$/tuan03/Composite/Composite.iml" />
+      <module fileurl="file://$PROJECT_DIR$/tuan03/Observer/Observer.iml" filepath="$PROJECT_DIR$/tuan03/Observer/Observer.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/partter.iml" filepath="$PROJECT_DIR$/.idea/partter.iml" />
+    </modules>
+  </component>
+</project>
