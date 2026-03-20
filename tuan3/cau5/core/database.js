@@ -5,7 +5,7 @@ module.exports = {
     // Kết nối thẳng MongoDB theo mô hình Core kết nối Database
     mongoose
       .connect(
-        "mongodb+srv://duy:duy2801@duymongo.xvubqmf.mongodb.net/manage?appName=Duymongo",
+        "",
       )
       .then(() =>
         console.log("✅ [Database] Đã kết nối tới MongoDB thành công!"),
