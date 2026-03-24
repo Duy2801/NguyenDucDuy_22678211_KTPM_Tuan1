@@ -1,11 +1,9 @@
-FROM eclipse-temurin:17
+FROM node:18
 
 WORKDIR /app
 
-COPY HelloServer.java .
-
-RUN javac HelloServer.java
+COPY app.js .
 
 EXPOSE 3000
 
-CMD ["java", "HelloServer"]
+CMD ["node", "app.js"]
