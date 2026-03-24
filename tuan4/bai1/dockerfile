@@ -1,0 +1,11 @@
+FROM eclipse-temurin:17
+
+WORKDIR /app
+
+COPY HelloServer.java .
+
+RUN javac HelloServer.java
+
+EXPOSE 3000
+
+CMD ["java", "HelloServer"]
