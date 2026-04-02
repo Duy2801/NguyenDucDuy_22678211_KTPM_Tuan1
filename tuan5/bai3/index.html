@@ -1,0 +1,315 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Quản lý Đơn hàng - Hệ thống Microservices</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+      }
+
+      .container {
+        background: white;
+        border-radius: 15px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        padding: 40px;
+        max-width: 600px;
+        width: 100%;
+      }
+
+      h1 {
+        color: #333;
+        margin-bottom: 30px;
+        text-align: center;
+        font-size: 28px;
+      }
+
+      .button-group {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+        margin-bottom: 30px;
+      }
+
+      button {
+        padding: 12px 20px;
+        font-size: 16px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        color: white;
+      }
+
+      button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+      }
+
+      button:active {
+        transform: translateY(0);
+      }
+
+      #orderBtn {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      }
+
+      #payBtn {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      }
+
+      #shipBtn {
+        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+      }
+
+      .info-box {
+        background: #f8f9fa;
+        border: 2px solid #e9ecef;
+        border-radius: 10px;
+        padding: 20px;
+        margin-top: 20px;
+      }
+
+      .info-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 12px 0;
+        border-bottom: 1px solid #dee2e6;
+        font-size: 16px;
+      }
+
+      .info-row:last-child {
+        border-bottom: none;
+      }
+
+      .info-label {
+        font-weight: 600;
+        color: #495057;
+      }
+
+      .info-value {
+        color: #333;
+        font-weight: 500;
+      }
+
+      .status {
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 14px;
+        font-weight: 600;
+        display: inline-block;
+      }
+
+      .status.pending {
+        background-color: #fff3cd;
+        color: #856404;
+      }
+
+      .status.completed {
+        background-color: #d4edda;
+        color: #155724;
+      }
+
+      .message {
+        margin-top: 20px;
+        padding: 12px;
+        border-radius: 8px;
+        text-align: center;
+        font-size: 14px;
+        display: none;
+      }
+
+      .message.error {
+        background-color: #f8d7da;
+        color: #721c24;
+        display: block;
+      }
+
+      .message.success {
+        background-color: #d4edda;
+        color: #155724;
+        display: block;
+      }
+
+      .empty-state {
+        text-align: center;
+        color: #6c757d;
+        padding: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>📦 Quản lý Đơn hàng</h1>
+
+      <div class="button-group">
+        <button id="orderBtn" onclick="order()">➕ Tạo Đơn hàng mới</button>
+        <button id="payBtn" onclick="pay()" disabled>💳 Thanh toán</button>
+        <button id="shipBtn" onclick="ship()" disabled>🚚 Giao hàng</button>
+      </div>
+
+      <div id="message" class="message"></div>
+
+      <div id="info" class="info-box" style="display: none">
+        <div class="info-row">
+          <span class="info-label">ID Đơn:</span>
+          <span class="info-value" id="id">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Sản phẩm:</span>
+          <span class="info-value" id="product">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Thanh toán:</span>
+          <span class="info-value"
+            ><span id="p-status" class="status pending">-</span></span
+          >
+        </div>
+        <div class="info-row">
+          <span class="info-label">Giao hàng:</span>
+          <span class="info-value"
+            ><span id="s-status" class="status pending">-</span></span
+          >
+        </div>
+      </div>
+
+      <div id="emptyState" class="empty-state">
+        <p>👈 Hãy tạo đơn hàng mới để bắt đầu</p>
+      </div>
+    </div>
+
+    <script>
+      let orderId = null;
+      let currentOrder = null;
+
+      function showMessage(text, type) {
+        const messageEl = document.getElementById("message");
+        messageEl.innerText = text;
+        messageEl.className = `message ${type}`;
+        setTimeout(() => {
+          messageEl.className = "message";
+        }, 3000);
+      }
+
+      async function order() {
+        try {
+          const r = await fetch("http://localhost:8081/orders", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ product: "Laptop" }),
+          });
+
+          if (!r.ok) throw new Error("Lỗi tạo đơn hàng");
+
+          const d = await r.json();
+          orderId = d.id;
+          currentOrder = d;
+          update(d);
+          showMessage("✅ Tạo đơn hàng thành công!", "success");
+          enableButtons();
+        } catch (e) {
+          showMessage("❌ Lỗi kết nối đến Order Service", "error");
+          console.error("Order Error:", e);
+        }
+      }
+
+      async function pay() {
+        if (!orderId) {
+          showMessage("⚠️ Vui lòng tạo đơn hàng trước", "error");
+          return;
+        }
+
+        try {
+          const r = await fetch(`http://localhost:8082/payments/${orderId}`, {
+            method: "PUT",
+          });
+          if (!r.ok) throw new Error("Lỗi thanh toán");
+
+          currentOrder = await r.json();
+          update(currentOrder);
+          showMessage("✅ Thanh toán thành công!", "success");
+        } catch (e) {
+          showMessage("❌ Lỗi kết nối đến Payment Service", "error");
+          console.error("Payment Error:", e);
+        }
+      }
+
+      async function ship() {
+        if (!orderId) {
+          showMessage("⚠️ Vui lòng tạo đơn hàng trước", "error");
+          return;
+        }
+
+        try {
+          const r = await fetch(`http://localhost:8083/shippings/${orderId}`, {
+            method: "PUT",
+          });
+          if (!r.ok) throw new Error("Lỗi giao hàng");
+
+          currentOrder = await r.json();
+          update(currentOrder);
+          showMessage("✅ Giao hàng thành công!", "success");
+        } catch (e) {
+          showMessage("❌ Lỗi kết nối đến Shipping Service", "error");
+          console.error("Shipping Error:", e);
+        }
+      }
+
+      function update(d) {
+        const infoBox = document.getElementById("info");
+        const emptyState = document.getElementById("emptyState");
+
+        infoBox.style.display = "block";
+        emptyState.style.display = "none";
+
+        document.getElementById("id").innerText = d.id;
+        document.getElementById("product").innerText = d.product;
+
+        const payStatus = document.getElementById("p-status");
+        const shipStatus = document.getElementById("s-status");
+
+        payStatus.innerText = d.paymentStatus;
+        shipStatus.innerText = d.shippingStatus;
+
+        payStatus.className =
+          "status " +
+          (d.paymentStatus.includes("ĐÃ") ? "completed" : "pending");
+        shipStatus.className =
+          "status " +
+          (d.shippingStatus.includes("ĐÃ") ? "completed" : "pending");
+      }
+
+      function enableButtons() {
+        document.getElementById("payBtn").disabled = false;
+        document.getElementById("shipBtn").disabled = false;
+      }
+
+      function disableButtons() {
+        document.getElementById("payBtn").disabled = true;
+        document.getElementById("shipBtn").disabled = true;
+      }
+
+      // Khôi phục trạng thái khi tải trang
+      window.addEventListener("load", () => {
+        disableButtons();
+        const savedOrderId = localStorage.getItem("lastOrderId");
+        if (savedOrderId) {
+          orderId = savedOrderId;
+          // Tùy chọn: Tải lại thông tin đơn hàng từ server
+        }
+      });
+    </script>
+  </body>
+</html>
