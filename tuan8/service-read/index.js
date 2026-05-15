@@ -1,6 +1,9 @@
 const redis = require('redis');
 const mariadb = require('mariadb');
 
+const READ_QUEUE = 'product-read-commands';
+const PRODUCTS_CACHE_KEY = 'products';
+
 const db = mariadb.createPool({
   host: 'localhost',
   port: 3306,
@@ -10,51 +13,108 @@ const db = mariadb.createPool({
   connectionLimit: 5
 });
 
+function normalizeProducts(rows) {
+  return rows.map((item) => ({
+    id: Number(item.id),
+    name: item.name,
+    price: Number(item.price)
+  }));
+}
+
+async function sendResponse(client, requestId, payload) {
+  if (!requestId) {
+    return;
+  }
+
+  await client.lPush(`product-response:${requestId}`, JSON.stringify(payload));
+}
+
+async function getProductsFromRedisOrDb(cacheClient) {
+  const cache = await cacheClient.get(PRODUCTS_CACHE_KEY);
+
+  if (cache) {
+    try {
+      return {
+        products: JSON.parse(cache),
+        source: 'redis'
+      };
+    } catch {
+      await cacheClient.del(PRODUCTS_CACHE_KEY);
+    }
+  }
+
+  const rows = await db.query('SELECT id, name, price FROM products');
+  const products = normalizeProducts(rows);
+  await cacheClient.set(PRODUCTS_CACHE_KEY, JSON.stringify(products));
+
+  return {
+    products,
+    source: 'db'
+  };
+}
+
 async function start() {
-  try {
-    // Redis subscriber để lắng nghe sự kiện
-    const subscriber = redis.createClient({
-      url: 'redis://localhost:6379'
-    });
+  const subscriber = redis.createClient({ url: 'redis://localhost:6379' });
+  const cacheClient = redis.createClient({ url: 'redis://localhost:6379' });
+  const worker = redis.createClient({ url: 'redis://localhost:6379' });
 
-    // Redis cache để lưu dữ liệu
-    const cache = redis.createClient({
-      url: 'redis://localhost:6379'
-    });
+  subscriber.on('error', (error) => {
+    console.error('Redis subscriber error:', error.message);
+  });
 
-    await subscriber.connect();
-    await cache.connect();
+  cacheClient.on('error', (error) => {
+    console.error('Redis cache error:', error.message);
+  });
 
-    console.log('🚀 SERVICE-READ RUNNING (Port: Event Listener)');
-    console.log('📢 Listening for product-events...\n');
+  worker.on('error', (error) => {
+    console.error('Redis worker error:', error.message);
+  });
 
-    // Lắng nghe sự kiện từ product-events channel
-    await subscriber.subscribe('product-events', async (message) => {
-      try {
-        const event = JSON.parse(message);
-        
-        console.log('───────────────────────────────────────');
-        console.log('📨 EVENT RECEIVED:', event.type);
-        console.log('📦 Data:', event.data);
+  await subscriber.connect();
+  await cacheClient.connect();
+  await worker.connect();
 
-        // Khi có sự kiện, đọc lại toàn bộ dữ liệu từ Database
-        console.log('🔄 Reading fresh data from DATABASE...');
-        const products = await db.query('SELECT * FROM products');
+  await subscriber.subscribe('product-events', async () => {
+    try {
+      await cacheClient.del(PRODUCTS_CACHE_KEY);
+    } catch (error) {
+      console.error('Cache invalidation failed:', error.message);
+    }
+  });
 
-        // Lưu vào Redis cache
-        await cache.set('products', JSON.stringify(products));
-        
-        console.log('✅ CACHE UPDATED');
-        console.log(`📊 Total products in cache: ${products.length}`);
-        console.log('───────────────────────────────────────\n');
-      } catch (error) {
-        console.error('❌ ERROR processing event:', error.message);
+  console.log('service-read is listening for Redis read commands');
+
+  while (true) {
+    const item = await worker.brPop(READ_QUEUE, 0);
+    const command = JSON.parse(item.element);
+
+    try {
+      if (command.type !== 'READ_ALL') {
+        await sendResponse(worker, command.requestId, {
+          ok: false,
+          status: 400,
+          error: `Unsupported read command: ${command.type}`
+        });
+        continue;
       }
-    });
-  } catch (error) {
-    console.error('❌ SERVICE-READ ERROR:', error);
-    process.exit(1);
+
+      const { products, source } = await getProductsFromRedisOrDb(cacheClient);
+      await sendResponse(worker, command.requestId, {
+        ok: true,
+        data: products,
+        source
+      });
+    } catch (error) {
+      await sendResponse(worker, command.requestId, {
+        ok: false,
+        status: 500,
+        error: error.message
+      });
+    }
   }
 }
 
-start();
+start().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

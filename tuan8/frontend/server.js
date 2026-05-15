@@ -15,5 +15,4 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 FRONTEND RUNNING ON http://localhost:${PORT}`);
 });

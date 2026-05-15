@@ -71,7 +71,6 @@ async function fetchProducts() {
             totalProductsEl.textContent = products.length;
         }
     } catch (error) {
-        console.error('Error fetching products:', error);
         loadingSkeleton.classList.add('hidden');
         showNotification('Failed to fetch products', 'error');
     }
@@ -192,7 +191,6 @@ productForm.addEventListener('submit', async (e) => {
         // Refresh products
         setTimeout(fetchProducts, 500);
     } catch (error) {
-        console.error('Error saving product:', error);
         showNotification('Failed to save product', 'error');
     } finally {
         submitBtn.disabled = false;
@@ -240,7 +238,6 @@ saveEditBtn.addEventListener('click', async () => {
         
         setTimeout(fetchProducts, 500);
     } catch (error) {
-        console.error('Error updating product:', error);
         showNotification('Failed to update product', 'error');
     } finally {
         saveEditBtn.disabled = false;
@@ -271,7 +268,6 @@ async function deleteProduct(id) {
         
         setTimeout(fetchProducts, 500);
     } catch (error) {
-        console.error('Error deleting product:', error);
         showNotification('Failed to delete product', 'error');
     }
 }

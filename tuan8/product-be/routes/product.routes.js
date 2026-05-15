@@ -1,40 +1,67 @@
 const express = require('express');
 const router = express.Router();
 
-const db = require('../db');
 const redis = require('../redis');
 
-// ============================================
-// READ - Đọc từ Redis cache, không có thì đọc DB
-// ============================================
+const COMMAND_QUEUE = 'product-commands';
+const READ_QUEUE = 'product-read-commands';
+const PRODUCTS_CACHE_KEY = 'products';
+const RESPONSE_TIMEOUT_SECONDS = 10;
+
+function createRequestId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function sendRedisCommand(queue, payload) {
+  const requestId = createRequestId();
+  const responseKey = `product-response:${requestId}`;
+  const responseClient = redis.duplicate();
+
+  await responseClient.connect();
+
+  try {
+    await redis.lPush(queue, JSON.stringify({ ...payload, requestId }));
+
+    const response = await responseClient.brPop(responseKey, RESPONSE_TIMEOUT_SECONDS);
+    await redis.del(responseKey);
+
+    if (!response) {
+      const error = new Error('Service timeout');
+      error.status = 504;
+      throw error;
+    }
+
+    const result = JSON.parse(response.element);
+
+    if (!result.ok) {
+      const error = new Error(result.error || 'Service error');
+      error.status = result.status || 500;
+      throw error;
+    }
+
+    return result.data;
+  } finally {
+    await responseClient.quit();
+  }
+}
+
+// API only reads Redis cache. On cache miss, ask service-read through Redis.
 router.get('/', async (req, res) => {
   try {
-    const cache = await redis.get('products');
+    const cache = await redis.get(PRODUCTS_CACHE_KEY);
 
-    // Bước 1: Kiểm tra Redis cache trước
     if (cache) {
-      console.log('✓ READ FROM REDIS CACHE');
       return res.json(JSON.parse(cache));
     }
 
-    // Bước 2: Nếu không có cache, đọc từ Database
-    console.log('✓ READ FROM DATABASE');
-    const rows = await db.query('SELECT * FROM products');
-
-    // Bước 3: Lưu vào Redis cache để lần sau nhanh hơn
-    await redis.set('products', JSON.stringify(rows));
-    console.log('✓ CACHE SAVED');
-
-    res.json(rows);
+    const products = await sendRedisCommand(READ_QUEUE, { type: 'READ_ALL' });
+    res.json(products);
   } catch (error) {
-    console.error('ERROR in GET /:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
-// ============================================
-// CREATE - Ghi vào DB, rồi công bố sự kiện
-// ============================================
+// API sends write commands to Redis. Only service-write touches the database.
 router.post('/', async (req, res) => {
   try {
     const { name, price } = req.body;
@@ -43,39 +70,17 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Name and price are required' });
     }
 
-    // Bước 1: Ghi vào Database
-    console.log('✓ WRITING TO DATABASE');
-    const result = await db.query(
-      'INSERT INTO products(name, price) VALUES (?, ?)',
-      [name, price]
-    );
-
-    const product = {
-      id: result.insertId,
-      name,
-      price
-    };
-
-    // Bước 2: Công bố sự kiện CREATE qua Redis
-    console.log('✓ PUBLISHING CREATE EVENT');
-    await redis.publish(
-      'product-events',
-      JSON.stringify({
-        type: 'CREATE',
-        data: product
-      })
-    );
+    const product = await sendRedisCommand(COMMAND_QUEUE, {
+      type: 'CREATE',
+      data: { name, price }
+    });
 
     res.status(201).json(product);
   } catch (error) {
-    console.error('ERROR in POST /:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
-// ============================================
-// UPDATE - Cập nhật DB, rồi công bố sự kiện
-// ============================================
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -85,61 +90,29 @@ router.put('/:id', async (req, res) => {
       return res.status(400).json({ error: 'Name and price are required' });
     }
 
-    // Bước 1: Cập nhật Database
-    console.log('✓ UPDATING DATABASE');
-    await db.query(
-      'UPDATE products SET name=?, price=? WHERE id=?',
-      [name, price, id]
-    );
-
-    const product = {
-      id: parseInt(id),
-      name,
-      price: parseFloat(price)
-    };
-
-    // Bước 2: Công bố sự kiện UPDATE qua Redis
-    console.log('✓ PUBLISHING UPDATE EVENT');
-    await redis.publish(
-      'product-events',
-      JSON.stringify({
-        type: 'UPDATE',
-        data: product
-      })
-    );
+    const product = await sendRedisCommand(COMMAND_QUEUE, {
+      type: 'UPDATE',
+      data: { id: Number(id), name, price }
+    });
 
     res.json(product);
   } catch (error) {
-    console.error('ERROR in PUT /:id:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
-// ============================================
-// DELETE - Xóa từ DB, rồi công bố sự kiện
-// ============================================
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Bước 1: Xóa từ Database
-    console.log('✓ DELETING FROM DATABASE');
-    await db.query('DELETE FROM products WHERE id=?', [id]);
+    const result = await sendRedisCommand(COMMAND_QUEUE, {
+      type: 'DELETE',
+      data: { id: Number(id) }
+    });
 
-    // Bước 2: Công bố sự kiện DELETE qua Redis
-    console.log('✓ PUBLISHING DELETE EVENT');
-    await redis.publish(
-      'product-events',
-      JSON.stringify({
-        type: 'DELETE',
-        data: { id: parseInt(id) }
-      })
-    );
-
-    res.json({ message: 'Product deleted successfully', id });
+    res.json(result);
   } catch (error) {
-    console.error('ERROR in DELETE /:id:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 

@@ -12,5 +12,4 @@ require('./routes/product.routes');
 app.use('/products', productRoutes);
 
 app.listen(3000, () => {
-  console.log('PRODUCT-BE RUNNING 3000');
 });
