@@ -2,77 +2,46 @@ const express = require('express');
 const redis = require('redis');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
-const mariadb = require('mariadb');
 
 const app = express();
 const PORT = 8083;
+const ORDER_WRITE_QUEUE = 'order-write-commands';
+const RESPONSE_TIMEOUT_SECONDS = 10;
 
-// MariaDB Config
-const mariadbConfig = {
-  host: 'localhost',
-  port: 3306,
-  user: 'root',
-  password: 'sapassword',
-  database: 'flashsale_db',
-  waitForConnections: true,
-  connectionLimit: 5,
-  queueLimit: 0,
-};
-
-let pool;
-
-// Initialize MariaDB Pool + orders table
-async function initMariaDB() {
-  try {
-    pool = mariadb.createPool(mariadbConfig);
-    const conn = await pool.getConnection();
-
-    await conn.query('CREATE DATABASE IF NOT EXISTS flashsale_db');
-    await conn.query(`
-      CREATE TABLE IF NOT EXISTS orders (
-        order_id VARCHAR(100) PRIMARY KEY,
-        session_id VARCHAR(100) NOT NULL,
-        customer_name VARCHAR(255),
-        customer_email VARCHAR(255),
-        customer_phone VARCHAR(100),
-        items_json LONGTEXT NOT NULL,
-        total INT NOT NULL,
-        status VARCHAR(50) NOT NULL,
-        created_at DATETIME NOT NULL,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
-
-    conn.release();
-    console.log('✅ MariaDB connected and orders table ready');
-  } catch (error) {
-    console.error('❌ MariaDB Error:', error.message);
-    process.exit(1);
-  }
+function createRequestId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-async function persistOrderToMariaDB(orderData) {
-  const conn = await pool.getConnection();
+async function sendQueueCommand(queue, payload) {
+  const requestId = createRequestId();
+  const responseKey = `product-response:${requestId}`;
+  const responseClient = redisClient.duplicate();
+
+  await responseClient.connect();
+
   try {
-    await conn.query(
-      `INSERT INTO orders (
-        order_id, session_id, customer_name, customer_email, customer_phone,
-        items_json, total, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        orderData.orderId,
-        orderData.sessionId,
-        orderData.customerName,
-        orderData.customerEmail,
-        orderData.customerPhone,
-        orderData.items,
-        parseInt(orderData.total),
-        orderData.status,
-        new Date(orderData.createdAt),
-      ]
-    );
+    await redisClient.lPush(queue, JSON.stringify({ ...payload, requestId }));
+
+    const response = await responseClient.brPop(responseKey, RESPONSE_TIMEOUT_SECONDS);
+    await redisClient.del(responseKey);
+
+    if (!response) {
+      const error = new Error('Service timeout');
+      error.status = 504;
+      throw error;
+    }
+
+    const result = JSON.parse(response.element);
+
+    if (!result.ok) {
+      const error = new Error(result.error || 'Service error');
+      error.status = result.status || 500;
+      throw error;
+    }
+
+    return result.data;
   } finally {
-    conn.release();
+    await responseClient.quit();
   }
 }
 
@@ -153,8 +122,16 @@ app.post('/checkout', async (req, res) => {
     // Store order in Redis
     await redisClient.hSet(`order:${orderId}`, orderData);
 
-    // Persist order to MariaDB (Redis remains the primary runtime data source)
-    await persistOrderToMariaDB(orderData);
+    try {
+      // Persist order through data-write worker instead of writing MariaDB directly
+      await sendQueueCommand(ORDER_WRITE_QUEUE, {
+        type: 'ORDER_CREATE',
+        data: orderData,
+      });
+    } catch (error) {
+      await redisClient.del(`order:${orderId}`);
+      throw error;
+    }
 
     // Add order ID to orders list
     const ordersList = JSON.parse(await redisClient.get('orders:list') || '[]');
@@ -260,6 +237,5 @@ app.get('/health', (req, res) => {
 
 // Start server
 app.listen(PORT, async () => {
-  await initMariaDB();
   console.log(`🚀 PU3 (Order) running on http://localhost:${PORT}`);
 });

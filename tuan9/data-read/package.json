@@ -1,0 +1,16 @@
+{
+  "name": "tuan9-data-read",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "mariadb": "^3.5.2",
+    "redis": "^4.6.5"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.20"
+  }
+}

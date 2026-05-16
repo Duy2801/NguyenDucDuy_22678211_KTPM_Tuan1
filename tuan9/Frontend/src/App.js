@@ -298,8 +298,8 @@ function App() {
               <h3>Data Grid</h3>
               <ul>
                 <li>📊 Redis: localhost:6379</li>
-                <li>✓ Zero Database Calls</li>
-                <li>✓ All data in-memory</li>
+                <li>✓ Event-driven data-write / data-read workers</li>
+                <li>✓ Redis cache with MariaDB fallback through workers</li>
                 <li>✓ Low latency responses</li>
               </ul>
             </div>

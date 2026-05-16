@@ -1,301 +1,246 @@
 const express = require('express');
 const redis = require('redis');
 const cors = require('cors');
-const mariadb = require('mariadb');
 
 const app = express();
 const PORT = 8081;
+const WRITE_QUEUE = 'product-write-commands';
+const READ_QUEUE = 'product-read-commands';
+const RESPONSE_TIMEOUT_SECONDS = 10;
 
-// MariaDB Config
-const mariadbConfig = {
-  host: 'localhost',
-  port: 3306,
-  user: 'root',
-  password: 'sapassword',
-  database: 'flashsale_db',
-  waitForConnections: true,
-  connectionLimit: 5,
-  queueLimit: 0,
-};
-
-let pool;
-
-// Initialize MariaDB Pool
-async function initMariaDB() {
-  try {
-    pool = mariadb.createPool(mariadbConfig);
-    const conn = await pool.getConnection();
-    
-    // Create database if not exists
-    await conn.query('CREATE DATABASE IF NOT EXISTS flashsale_db');
-    
-    // Create products table
-    await conn.query(`
-      CREATE TABLE IF NOT EXISTS products (
-        id VARCHAR(50) PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        price INT NOT NULL,
-        stock INT NOT NULL,
-        image VARCHAR(500),
-        description TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
-    
-    conn.release();
-    console.log('✅ MariaDB connected and tables created');
-  } catch (error) {
-    console.error('❌ MariaDB Error:', error.message);
-    process.exit(1);
-  }
-}
-
-// Redis Client
 const redisClient = redis.createClient({
   host: 'localhost',
   port: 6379,
 });
 
-redisClient.on('error', (err) => console.log('Redis Client Error', err));
-redisClient.connect();
+redisClient.on('error', (error) => console.log('Redis Client Error', error));
 
-// Subscriber for inventory events (to persist changes to MariaDB)
-let subscriber;
+function createRequestId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
-async function initSubscriber() {
+async function sendQueueCommand(queue, payload) {
+  const requestId = createRequestId();
+  const responseKey = `product-response:${requestId}`;
+  const responseClient = redisClient.duplicate();
+
+  await responseClient.connect();
+
   try {
-    subscriber = redisClient.duplicate();
-    await subscriber.connect();
+    await redisClient.lPush(queue, JSON.stringify({ ...payload, requestId }));
 
-    await subscriber.subscribe('inventory_events', async (message) => {
-      try {
-        const event = JSON.parse(message);
-        if (event.type === 'stock_reduced') {
-          const conn = await pool.getConnection();
-          // Update MariaDB product stock to the new stock value
-          await conn.query('UPDATE products SET stock = ? WHERE id = ?', [event.newStock, event.productId]);
-          conn.release();
-          console.log(`🔁 Persisted stock update for product ${event.productId} -> ${event.newStock}`);
-        }
-      } catch (err) {
-        console.error('Error handling inventory event:', err.message);
-      }
-    });
-  } catch (err) {
-    console.error('Error initializing Redis subscriber:', err.message);
+    const response = await responseClient.brPop(responseKey, RESPONSE_TIMEOUT_SECONDS);
+    await redisClient.del(responseKey);
+
+    if (!response) {
+      const error = new Error('Service timeout');
+      error.status = 504;
+      throw error;
+    }
+
+    const result = JSON.parse(response.element);
+
+    if (!result.ok) {
+      const error = new Error(result.error || 'Service error');
+      error.status = result.status || 500;
+      throw error;
+    }
+
+    return result.data;
+  } finally {
+    await responseClient.quit();
   }
 }
 
 app.use(cors());
 app.use(express.json());
 
-// Mock data - sẽ được đẩy vào Redis
-const mockProducts = [
-  {
-    id: '1',
-    name: 'iPhone 15 Pro',
-    price: 999,
-    stock: 100,
-    image: 'https://via.placeholder.com/300',
-    description: 'Flagship smartphone',
-  },
-  {
-    id: '2',
-    name: 'MacBook Pro',
-    price: 1999,
-    stock: 50,
-    image: 'https://via.placeholder.com/300',
-    description: 'High-performance laptop',
-  },
-  {
-    id: '3',
-    name: 'iPad Air',
-    price: 599,
-    stock: 200,
-    image: 'https://via.placeholder.com/300',
-    description: 'Tablet for productivity',
-  },
-  {
-    id: '4',
-    name: 'AirPods Pro',
-    price: 249,
-    stock: 500,
-    image: 'https://via.placeholder.com/300',
-    description: 'Wireless earbuds',
-  },
-  {
-    id: '5',
-    name: 'Apple Watch',
-    price: 399,
-    stock: 150,
-    image: 'https://via.placeholder.com/300',
-    description: 'Smart watch',
-  },
-];
-
-// Initialize Redis with products
-async function initializeData() {
-  try {
-    const conn = await pool.getConnection();
-    
-    for (const product of mockProducts) {
-      // Write-Through: Save to Redis first
-      await redisClient.hSet(`product:${product.id}`, {
-        id: product.id,
-        name: product.name,
-        price: product.price.toString(),
-        stock: product.stock.toString(),
-        image: product.image,
-        description: product.description,
-      });
-      
-      // Then save to MariaDB
-      await conn.query(
-        `INSERT IGNORE INTO products (id, name, price, stock, image, description) 
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [product.id, product.name, product.price, product.stock, product.image, product.description]
-      );
-    }
-    
-    // Store product IDs list in Redis
-    await redisClient.set('product:ids', JSON.stringify(mockProducts.map(p => p.id)));
-    
-    conn.release();
-    console.log('✅ Redis + MariaDB initialized with products');
-  } catch (error) {
-    console.error('❌ Error initializing data:', error);
-  }
-}
-
-// API: Get all products
 app.get('/products', async (req, res) => {
   try {
-    // Try Redis first
-    let productIds = await redisClient.get('product:ids');
-    
-    if (!productIds) {
-      // Cache miss: Read from MariaDB
-      const conn = await pool.getConnection();
-      const rows = await conn.query('SELECT id FROM products');
-      conn.release();
-      
-      productIds = JSON.stringify(rows.map(r => r.id));
-      // Update Redis cache
-      await redisClient.set('product:ids', productIds);
-    }
-    
-    productIds = JSON.parse(productIds || '[]');
-    const products = [];
+    const cache = await redisClient.get('product:ids');
 
-    for (const id of productIds) {
-      let product = await redisClient.hGetAll(`product:${id}`);
-      
-      // If not in Redis, get from MariaDB
-      if (Object.keys(product).length === 0) {
-        const conn = await pool.getConnection();
-        const rows = await conn.query('SELECT * FROM products WHERE id = ?', [id]);
-        conn.release();
-        
-        if (rows.length > 0) {
-          const row = rows[0];
-          product = {
-            id: row.id,
-            name: row.name,
-            price: row.price.toString(),
-            stock: row.stock.toString(),
-            image: row.image,
-            description: row.description,
-          };
-          // Update Redis cache
-          await redisClient.hSet(`product:${id}`, product);
+    if (cache) {
+      const productIds = JSON.parse(cache || '[]');
+      const products = [];
+
+      for (const id of productIds) {
+        const product = await redisClient.hGetAll(`product:${id}`);
+        if (Object.keys(product).length > 0) {
+          products.push({
+            ...product,
+            price: parseInt(product.price, 10),
+            stock: parseInt(product.stock, 10),
+          });
+          continue;
+        }
+
+        try {
+          const result = await sendQueueCommand(READ_QUEUE, { type: 'READ_ONE', data: { id } });
+          if (result?.product) {
+            products.push({
+              ...result.product,
+              price: parseInt(result.product.price, 10),
+              stock: parseInt(result.product.stock, 10),
+            });
+          }
+        } catch (error) {
+          if (error.status !== 404) {
+            throw error;
+          }
         }
       }
-      
-      if (Object.keys(product).length > 0) {
-        products.push({
-          ...product,
-          price: parseInt(product.price),
-          stock: parseInt(product.stock),
-        });
-      }
+
+      return res.json({
+        success: true,
+        data: products,
+        message: 'Products retrieved from Redis cache',
+        cache: 'HIT',
+      });
     }
 
-    res.json({
+    const result = await sendQueueCommand(READ_QUEUE, { type: 'READ_ALL' });
+
+    return res.json({
       success: true,
-      data: products,
-      message: 'Products retrieved from Data Grid (Redis) or MariaDB',
-      cache: productIds.length > 0 ? 'HIT' : 'MISS',
+      data: result.products,
+      message: 'Products retrieved through data-read worker',
+      cache: result.source === 'redis' ? 'HIT' : 'MISS',
     });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(error.status || 500).json({ success: false, error: error.message });
   }
 });
 
-// API: Get single product
 app.get('/products/:id', async (req, res) => {
   try {
     const { id } = req.params;
     let product = await redisClient.hGetAll(`product:${id}`);
     let source = 'Redis';
 
-    // If not in Redis, get from MariaDB
     if (Object.keys(product).length === 0) {
-      const conn = await pool.getConnection();
-      const rows = await conn.query('SELECT * FROM products WHERE id = ?', [id]);
-      conn.release();
-      
-      if (rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Product not found',
-        });
-      }
-      
-      const row = rows[0];
-      product = {
-        id: row.id,
-        name: row.name,
-        price: row.price.toString(),
-        stock: row.stock.toString(),
-        image: row.image,
-        description: row.description,
-      };
-      source = 'MariaDB';
-      
-      // Update Redis cache
-      await redisClient.hSet(`product:${id}`, product);
+      const result = await sendQueueCommand(READ_QUEUE, { type: 'READ_ONE', data: { id } });
+      product = result.product;
+      source = result.source === 'db' ? 'MariaDB' : 'Redis';
     }
 
     res.json({
       success: true,
       data: {
         ...product,
-        price: parseInt(product.price),
-        stock: parseInt(product.stock),
+        price: parseInt(product.price, 10),
+        stock: parseInt(product.stock, 10),
       },
       message: `Product retrieved from ${source}`,
       source,
     });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(error.status || 500).json({ success: false, error: error.message });
   }
 });
 
-// Health check
+app.post('/products', async (req, res) => {
+  try {
+    const { name, price, stock, image, description } = req.body;
+
+    if (!name || price === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'Name and price are required',
+      });
+    }
+
+    const product = await sendQueueCommand(WRITE_QUEUE, {
+      type: 'CREATE',
+      data: {
+        name,
+        price: Number(price),
+        stock: Number(stock ?? 0),
+        image,
+        description,
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      data: product,
+      message: 'Product created through data-write worker',
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/products/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, price, stock, image, description } = req.body;
+
+    if (!name || price === undefined || stock === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'Name, price and stock are required',
+      });
+    }
+
+    const product = await sendQueueCommand(WRITE_QUEUE, {
+      type: 'UPDATE',
+      data: {
+        id,
+        name,
+        price: Number(price),
+        stock: Number(stock),
+        image,
+        description,
+      },
+    });
+
+    res.json({
+      success: true,
+      data: product,
+      message: 'Product updated through data-write worker',
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/products/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await sendQueueCommand(WRITE_QUEUE, {
+      type: 'DELETE',
+      data: { id },
+    });
+
+    res.json({
+      success: true,
+      data: result,
+      message: 'Product deleted through data-write worker',
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'alive',
-    service: 'PU1 - Product Processing Unit',
+    service: 'PU1 - Product API Gateway',
     port: PORT,
   });
 });
 
-// Start server
-app.listen(PORT, async () => {
-  await initMariaDB();
-  await initializeData();
-  await initSubscriber();
+async function start() {
+  await redisClient.connect();
+
+  app.listen(PORT, () => {
   console.log(`🚀 PU1 (Product) running on http://localhost:${PORT}`);
-  console.log(`📊 Using Redis + MariaDB Cache-Aside Pattern`);
+  console.log('📊 Using Redis queues with data-read and data-write workers');
+  });
+}
+
+start().catch((error) => {
+  console.error('Failed to start PU1:', error.message);
+  process.exit(1);
 });
